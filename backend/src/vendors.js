@@ -151,6 +151,45 @@ router.post('/documents', requireAuth, async (req, res) => {
 });
 
 // ----------------------------------------------------------------
+// GET /vendors/me/products — list my own products (all statuses)
+// IMPORTANT: must be defined BEFORE /me so Express doesn't
+// match /me first and miss the /products suffix
+// ----------------------------------------------------------------
+router.get('/me/products', requireAuth, async (req, res) => {
+    try {
+        const [vRows] = await pool.query(
+            'SELECT id FROM vendors WHERE owner_user_id = ? LIMIT 1',
+            [req.user.id]
+        );
+        if (vRows.length === 0) {
+            return res.status(404).json({ error: 'You are not a vendor' });
+        }
+        const vendorId = vRows[0].id;
+
+        const [rows] = await pool.query(
+            `SELECT
+                p.id, p.title, p.slug, p.status, p.base_price,
+                p.currency_code, p.view_count, p.published_at, p.created_at,
+                c.name AS category_name,
+                i.quantity_available AS stock,
+                (SELECT url FROM product_images pi
+                 WHERE pi.product_id = p.id AND pi.is_primary = 1
+                 LIMIT 1) AS primary_image
+             FROM products p
+             LEFT JOIN categories c ON c.id = p.category_id
+             LEFT JOIN inventory i  ON i.product_id = p.id
+             WHERE p.vendor_id = ?
+             ORDER BY p.created_at DESC`,
+            [vendorId]
+        );
+        res.json({ count: rows.length, products: rows });
+    } catch (err) {
+        console.error('My products error:', err);
+        res.status(500).json({ error: 'Failed to list products' });
+    }
+});
+
+// ----------------------------------------------------------------
 // GET /vendors/me — current user's vendor record + docs
 // ----------------------------------------------------------------
 router.get('/me', requireAuth, async (req, res) => {

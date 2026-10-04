@@ -5,9 +5,10 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { pool, testConnection } = require('./db');
-const { router: authRouter }    = require('./auth');
-const { router: vendorsRouter } = require('./vendors');
-const { router: adminRouter }   = require('./admin');
+const { router: authRouter }     = require('./auth');
+const { router: vendorsRouter }  = require('./vendors');
+const { router: adminRouter }    = require('./admin');
+const { router: productsRouter } = require('./products');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -37,7 +38,7 @@ app.get('/health', async (req, res) => {
 });
 
 // ----------------------------------------------------------------
-// GET /products — list all active products
+// GET /products — list all active products (public)
 // ----------------------------------------------------------------
 app.get('/products', async (req, res) => {
     try {
@@ -80,7 +81,7 @@ app.get('/products', async (req, res) => {
 });
 
 // ----------------------------------------------------------------
-// GET /products/:slug — single product with all images
+// GET /products/:slug — single product with all images (public)
 // ----------------------------------------------------------------
 app.get('/products/:slug', async (req, res) => {
     try {
@@ -176,14 +177,22 @@ app.get('/categories', async (req, res) => {
 });
 
 // ----------------------------------------------------------------
-// Auth routes  →  /auth/register  /auth/login  /auth/me
+// Auth routes   →  /auth/register  /auth/login  /auth/me
 // ----------------------------------------------------------------
 app.use('/auth', authRouter);
 
 // ----------------------------------------------------------------
-// Vendor routes  →  /vendors/apply  /vendors/documents  /vendors/me
+// Vendor routes →  /vendors/apply  /vendors/documents
+//                  /vendors/me      /vendors/me/products
 // ----------------------------------------------------------------
 app.use('/vendors', vendorsRouter);
+
+// ----------------------------------------------------------------
+// Product vendor routes → POST/PATCH/DELETE /products
+// Mounted AFTER the public GET routes so public reads still work.
+// This router only handles write operations.
+// ----------------------------------------------------------------
+app.use('/products', productsRouter);
 
 // ----------------------------------------------------------------
 // Admin routes  →  /admin/vendors  /admin/vendors/:id/approve ...
@@ -212,7 +221,6 @@ app.listen(PORT, async () => {
     console.log('  Try these URLs:');
     console.log(`  -> http://localhost:${PORT}/health`);
     console.log(`  -> http://localhost:${PORT}/products`);
-    console.log(`  -> http://localhost:${PORT}/products/handwoven-country-cloth`);
     console.log(`  -> http://localhost:${PORT}/categories`);
     console.log('');
     console.log('  Press Ctrl+C to stop');
