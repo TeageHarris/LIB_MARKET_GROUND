@@ -5,10 +5,13 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { pool, testConnection } = require('./db');
-const { router: authRouter }     = require('./auth');
-const { router: vendorsRouter }  = require('./vendors');
-const { router: adminRouter }    = require('./admin');
-const { router: productsRouter } = require('./products');
+const { router: authRouter }      = require('./auth');
+const { router: vendorsRouter }   = require('./vendors');
+const { router: adminRouter }     = require('./admin');
+const { router: productsRouter }  = require('./products');
+const { router: cartRouter }      = require('./cart');
+const { router: addressesRouter } = require('./addresses');
+const { router: ordersRouter }    = require('./orders');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -19,7 +22,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Simple request logger
+// Request logger
 app.use((req, res, next) => {
     console.log(`${new Date().toISOString()}  ${req.method}  ${req.url}`);
     next();
@@ -38,20 +41,14 @@ app.get('/health', async (req, res) => {
 });
 
 // ----------------------------------------------------------------
-// GET /products — list all active products (public)
+// GET /products — public list
 // ----------------------------------------------------------------
 app.get('/products', async (req, res) => {
     try {
         const [rows] = await pool.query(`
             SELECT
-                p.id,
-                p.title,
-                p.slug,
-                p.description,
-                p.base_price,
-                p.currency_code,
-                p.is_handmade,
-                p.origin_country,
+                p.id, p.title, p.slug, p.description,
+                p.base_price, p.currency_code, p.is_handmade, p.origin_country,
                 v.business_name AS vendor_name,
                 v.slug          AS vendor_slug,
                 c.name          AS category_name,
@@ -69,11 +66,7 @@ app.get('/products', async (req, res) => {
             WHERE p.status = 'active'
             ORDER BY p.published_at DESC
         `);
-
-        res.json({
-            count: rows.length,
-            products: rows
-        });
+        res.json({ count: rows.length, products: rows });
     } catch (err) {
         console.error('Error fetching products:', err);
         res.status(500).json({ error: 'Failed to fetch products' });
@@ -81,27 +74,16 @@ app.get('/products', async (req, res) => {
 });
 
 // ----------------------------------------------------------------
-// GET /products/:slug — single product with all images (public)
+// GET /products/:slug — public detail
 // ----------------------------------------------------------------
 app.get('/products/:slug', async (req, res) => {
     try {
         const { slug } = req.params;
-
         const [productRows] = await pool.query(`
             SELECT
-                p.id,
-                p.title,
-                p.slug,
-                p.description,
-                p.brand,
-                p.condition_type,
-                p.base_price,
-                p.currency_code,
-                p.weight_grams,
-                p.is_handmade,
-                p.is_digital,
-                p.origin_country,
-                p.view_count,
+                p.id, p.title, p.slug, p.description, p.brand,
+                p.condition_type, p.base_price, p.currency_code, p.weight_grams,
+                p.is_handmade, p.is_digital, p.origin_country, p.view_count,
                 v.id            AS vendor_id,
                 v.business_name AS vendor_name,
                 v.slug          AS vendor_slug,
@@ -122,7 +104,6 @@ app.get('/products/:slug', async (req, res) => {
         if (productRows.length === 0) {
             return res.status(404).json({ error: 'Product not found' });
         }
-
         const product = productRows[0];
 
         const [images] = await pool.query(`
@@ -131,7 +112,6 @@ app.get('/products/:slug', async (req, res) => {
             WHERE product_id = ?
             ORDER BY sort_order ASC
         `, [product.id]);
-
         product.images = images;
 
         pool.query('UPDATE products SET view_count = view_count + 1 WHERE id = ?', [product.id])
@@ -145,18 +125,13 @@ app.get('/products/:slug', async (req, res) => {
 });
 
 // ----------------------------------------------------------------
-// GET /categories — all active categories with product counts
+// GET /categories — public
 // ----------------------------------------------------------------
 app.get('/categories', async (req, res) => {
     try {
         const [rows] = await pool.query(`
             SELECT
-                c.id,
-                c.name,
-                c.slug,
-                c.icon_url,
-                c.sort_order,
-                c.parent_id,
+                c.id, c.name, c.slug, c.icon_url, c.sort_order, c.parent_id,
                 (
                     SELECT COUNT(*) FROM products p
                     WHERE p.category_id = c.id AND p.status = 'active'
@@ -165,11 +140,7 @@ app.get('/categories', async (req, res) => {
             WHERE c.is_active = 1
             ORDER BY c.sort_order ASC, c.name ASC
         `);
-
-        res.json({
-            count: rows.length,
-            categories: rows
-        });
+        res.json({ count: rows.length, categories: rows });
     } catch (err) {
         console.error('Error fetching categories:', err);
         res.status(500).json({ error: 'Failed to fetch categories' });
@@ -177,37 +148,25 @@ app.get('/categories', async (req, res) => {
 });
 
 // ----------------------------------------------------------------
-// Auth routes   →  /auth/register  /auth/login  /auth/me
+// Mounted routers
 // ----------------------------------------------------------------
-app.use('/auth', authRouter);
+app.use('/auth',      authRouter);
+app.use('/vendors',   vendorsRouter);
+app.use('/products',  productsRouter);
+app.use('/cart',      cartRouter);
+app.use('/addresses', addressesRouter);
+app.use('/orders',    ordersRouter);
+app.use('/admin',     adminRouter);
 
 // ----------------------------------------------------------------
-// Vendor routes →  /vendors/apply  /vendors/documents
-//                  /vendors/me      /vendors/me/products
-// ----------------------------------------------------------------
-app.use('/vendors', vendorsRouter);
-
-// ----------------------------------------------------------------
-// Product vendor routes → POST/PATCH/DELETE /products
-// Mounted AFTER the public GET routes so public reads still work.
-// This router only handles write operations.
-// ----------------------------------------------------------------
-app.use('/products', productsRouter);
-
-// ----------------------------------------------------------------
-// Admin routes  →  /admin/vendors  /admin/vendors/:id/approve ...
-// ----------------------------------------------------------------
-app.use('/admin', adminRouter);
-
-// ----------------------------------------------------------------
-// 404 for anything else (MUST be last, before app.listen)
+// 404 (MUST be last, before app.listen)
 // ----------------------------------------------------------------
 app.use((req, res) => {
     res.status(404).json({ error: 'Route not found' });
 });
 
 // ----------------------------------------------------------------
-// Start server (MUST be at the very bottom)
+// Start server
 // ----------------------------------------------------------------
 app.listen(PORT, async () => {
     console.log('');
