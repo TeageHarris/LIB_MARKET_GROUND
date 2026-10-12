@@ -2,6 +2,7 @@
 // LIB_MARKET_GROUND API Server
 
 require('dotenv').config();
+const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const { pool, testConnection } = require('./db');
@@ -9,9 +10,11 @@ const { router: authRouter }      = require('./auth');
 const { router: vendorsRouter }   = require('./vendors');
 const { router: adminRouter }     = require('./admin');
 const { router: productsRouter }  = require('./products');
+const { router: uploadsRouter }   = require('./uploads');
 const { router: cartRouter }      = require('./cart');
 const { router: addressesRouter } = require('./addresses');
 const { router: ordersRouter }    = require('./orders');
+const { expireStaleOrders }       = require('./expireOrders');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -27,6 +30,11 @@ app.use((req, res, next) => {
     console.log(`${new Date().toISOString()}  ${req.method}  ${req.url}`);
     next();
 });
+
+// ----------------------------------------------------------------
+// Static serving for uploaded images
+// ----------------------------------------------------------------
+app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
 // ----------------------------------------------------------------
 // Health check
@@ -54,6 +62,7 @@ app.get('/products', async (req, res) => {
                 c.name          AS category_name,
                 c.slug          AS category_slug,
                 i.quantity_available AS stock,
+                i.quantity_reserved  AS reserved,
                 (
                     SELECT url FROM product_images pi
                     WHERE pi.product_id = p.id AND pi.is_primary = 1
@@ -152,6 +161,7 @@ app.get('/categories', async (req, res) => {
 // ----------------------------------------------------------------
 app.use('/auth',      authRouter);
 app.use('/vendors',   vendorsRouter);
+app.use('/products',  uploadsRouter);
 app.use('/products',  productsRouter);
 app.use('/cart',      cartRouter);
 app.use('/addresses', addressesRouter);
@@ -186,3 +196,22 @@ app.listen(PORT, async () => {
     console.log('=====================================');
     console.log('');
 });
+
+// ----------------------------------------------------------------
+// Background sweep: auto-cancel stale orders
+// Runs every 6 hours. Orders stuck in pending_shipping_quote
+// or pending_payment for more than 48h get cancelled.
+// ----------------------------------------------------------------
+const SWEEP_INTERVAL_HOURS = 6;
+const EXPIRE_AFTER_HOURS   = 48;
+
+setInterval(async () => {
+    try {
+        const result = await expireStaleOrders(EXPIRE_AFTER_HOURS);
+        if (result.expired > 0) {
+            console.log(`[sweep] Auto-expired ${result.expired} stale order(s): ${result.order_ids.join(', ')}`);
+        }
+    } catch (err) {
+        console.error('[sweep] Failed:', err.message);
+    }
+}, SWEEP_INTERVAL_HOURS * 60 * 60 * 1000);

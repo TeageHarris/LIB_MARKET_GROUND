@@ -9,13 +9,26 @@ const router = express.Router();
 router.use(requireAuth);
 
 // ----------------------------------------------------------------
-// Get or create the user's cart
+// Get or create the user's cart (race-safe)
 // ----------------------------------------------------------------
 async function ensureCart(userId) {
-    const [rows] = await pool.query('SELECT * FROM carts WHERE user_id = ? LIMIT 1', [userId]);
+    // Fast path — existing cart
+    const [rows] = await pool.query(
+        'SELECT * FROM carts WHERE user_id = ? LIMIT 1',
+        [userId]
+    );
     if (rows.length > 0) return rows[0];
-    const [result] = await pool.query('INSERT INTO carts (user_id) VALUES (?)', [userId]);
-    const [created] = await pool.query('SELECT * FROM carts WHERE id = ?', [result.insertId]);
+
+    // Race-safe insert: concurrent requests can't blow up with ER_DUP_ENTRY
+    await pool.query(
+        'INSERT INTO carts (user_id) VALUES (?) ON DUPLICATE KEY UPDATE user_id = user_id',
+        [userId]
+    );
+
+    const [created] = await pool.query(
+        'SELECT * FROM carts WHERE user_id = ? LIMIT 1',
+        [userId]
+    );
     return created[0];
 }
 

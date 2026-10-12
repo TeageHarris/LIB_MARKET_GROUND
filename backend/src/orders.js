@@ -12,7 +12,7 @@ const router = express.Router();
 // ----------------------------------------------------------------
 async function getVendorForUser(userId) {
     const [rows] = await pool.query(
-        `SELECT id, business_name, verification_status
+        `SELECT id, business_name, verification_status, default_shipping_usd
          FROM vendors WHERE owner_user_id = ? LIMIT 1`,
         [userId]
     );
@@ -48,6 +48,13 @@ async function generateOrderNumber(conn) {
 // ----------------------------------------------------------------
 // POST /orders — create order from current cart
 // Body: { shipping_address_id, buyer_note? }
+//
+// Order starts in 'pending_shipping_quote' — the vendor will
+// manually set the shipping fee after seeing the buyer's address,
+// since courier costs vary by distance.
+//
+// COD model: the product price is paid online; shipping is paid
+// in cash to the courier on delivery.
 // ----------------------------------------------------------------
 router.post('/', requireAuth, async (req, res) => {
     const conn = await pool.getConnection();
@@ -60,12 +67,13 @@ router.post('/', requireAuth, async (req, res) => {
         }
 
         const [addrRows] = await conn.query(
-            'SELECT id FROM addresses WHERE id = ? AND user_id = ? LIMIT 1',
+            'SELECT id, country FROM addresses WHERE id = ? AND user_id = ? LIMIT 1',
             [shipping_address_id, userId]
         );
         if (addrRows.length === 0) {
             return res.status(404).json({ error: 'Shipping address not found' });
         }
+        const buyerCountry = (addrRows[0].country || 'LR').toUpperCase();
 
         const [cartRows] = await conn.query(
             'SELECT * FROM carts WHERE user_id = ? LIMIT 1', [userId]
@@ -79,11 +87,14 @@ router.post('/', requireAuth, async (req, res) => {
             `SELECT
                 ci.id, ci.product_id, ci.vendor_id, ci.quantity, ci.unit_price_snapshot,
                 p.title, p.status AS product_status,
+                p.shipping_fee_usd,
                 (SELECT url FROM product_images pi
                  WHERE pi.product_id = p.id AND pi.is_primary = 1
                  LIMIT 1) AS primary_image,
                 i.quantity_available AS stock,
-                v.commission_rate
+                i.quantity_reserved  AS reserved,
+                v.commission_rate,
+                v.default_shipping_usd
              FROM cart_items ci
              JOIN products p ON p.id = ci.product_id
              JOIN vendors  v ON v.id = ci.vendor_id
@@ -96,26 +107,46 @@ router.post('/', requireAuth, async (req, res) => {
             return res.status(400).json({ error: 'Cart is empty' });
         }
 
+        // Validate against FREE stock (total − reserved), not total.
         for (const it of items) {
             if (it.product_status !== 'active') {
                 return res.status(400).json({
                     error: `"${it.title}" is no longer available`
                 });
             }
-            const stock = it.stock || 0;
-            if (it.quantity > stock) {
+            const total    = it.stock || 0;
+            const reserved = it.reserved || 0;
+            const free     = total - reserved;
+            if (it.quantity > free) {
                 return res.status(400).json({
-                    error: `"${it.title}" only has ${stock} in stock`
+                    error: free <= 0
+                        ? `"${it.title}" is sold out`
+                        : `"${it.title}" only has ${free} available`
                 });
             }
         }
 
+        // Product subtotal — this is what the buyer pays online.
         const subtotal = items.reduce(
             (s, it) => s + parseFloat(it.unit_price_snapshot) * it.quantity, 0
         );
+
+        // Shipping is set later by the vendor — 0 for now.
         const shippingTotal = 0;
         const taxTotal = 0;
-        const grandTotal = subtotal + shippingTotal + taxTotal;
+
+        // COD: buyer pays the product online; shipping is paid to the courier.
+        const grandTotal = subtotal + taxTotal;
+
+        // Suggested shipping (product override wins, else vendor default)
+        // — returned to the frontend so the vendor knows where to start.
+        const suggestedShipping = items.reduce((s, it) => {
+            const productFee = parseFloat(it.shipping_fee_usd) || 0;
+            const vendorDefault = parseFloat(it.default_shipping_usd) || 0;
+            const fee = productFee > 0 ? productFee : vendorDefault;
+            return s + fee;
+        }, 0);
+
         const currency = cart.currency_code || 'USD';
         const vendorId = cart.vendor_id;
         const commissionRate = parseFloat(items[0].commission_rate) || 0.10;
@@ -127,16 +158,23 @@ router.post('/', requireAuth, async (req, res) => {
         const [orderResult] = await conn.query(
             `INSERT INTO orders
              (order_number, buyer_user_id, vendor_id, status, currency_code,
-              subtotal, shipping_total, tax_total, discount_total,
+              subtotal, shipping_total, shipping_paid_online,
+              tax_total, discount_total,
               grand_total, grand_total_usd,
               shipping_address_id, buyer_note)
-             VALUES (?, ?, ?, 'pending_payment', ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, 'pending_shipping_quote', ?, ?, ?, 0, ?, 0, ?, ?, ?, ?)`,
             [
                 orderNumber,
-                userId, vendorId, currency,
-                subtotal.toFixed(2), shippingTotal.toFixed(2), taxTotal.toFixed(2),
-                grandTotal.toFixed(2), grandTotal.toFixed(2),
-                shipping_address_id, buyer_note || null
+                userId,
+                vendorId,
+                currency,
+                subtotal.toFixed(2),
+                shippingTotal.toFixed(2),
+                taxTotal.toFixed(2),
+                grandTotal.toFixed(2),
+                grandTotal.toFixed(2),
+                shipping_address_id,
+                buyer_note || null
             ]
         );
         const orderId = orderResult.insertId;
@@ -168,7 +206,7 @@ router.post('/', requireAuth, async (req, res) => {
 
         await conn.query(
             `INSERT INTO payments (order_id, provider, amount, currency_code, amount_usd, status)
-             VALUES (?, 'mtn_momo', ?, ?, ?, 'pending')`,
+             VALUES (?, 'manual', ?, ?, ?, 'pending')`,
             [orderId, grandTotal.toFixed(2), currency, grandTotal.toFixed(2)]
         );
 
@@ -178,9 +216,13 @@ router.post('/', requireAuth, async (req, res) => {
         await conn.commit();
 
         res.status(201).json({
-            message: 'Order placed. Awaiting payment confirmation.',
+            message: 'Order placed. Awaiting shipping quote from vendor.',
             order_id: orderId,
             order_number: orderNumber,
+            subtotal: subtotal.toFixed(2),
+            shipping_total: shippingTotal.toFixed(2),
+            suggested_shipping: suggestedShipping.toFixed(2),
+            buyer_country: buyerCountry,
             grand_total: grandTotal.toFixed(2),
             currency
         });
@@ -201,7 +243,8 @@ router.get('/', requireAuth, async (req, res) => {
         const [orders] = await pool.query(
             `SELECT
                 o.id, o.order_number, o.status, o.currency_code,
-                o.subtotal, o.grand_total, o.placed_at, o.delivered_at,
+                o.subtotal, o.shipping_total, o.shipping_paid_online,
+                o.grand_total, o.placed_at, o.delivered_at,
                 v.business_name AS vendor_name,
                 (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id) AS item_count,
                 (SELECT title_snapshot FROM order_items oi WHERE oi.order_id = o.id LIMIT 1) AS first_item_title,
@@ -318,8 +361,10 @@ router.post('/:id/pay', requireAuth, async (req, res) => {
         await conn.query(
             `UPDATE inventory i
              JOIN order_items oi ON oi.product_id = i.product_id
-             SET i.quantity_available = i.quantity_available - oi.quantity,
-                 i.quantity_reserved  = i.quantity_reserved  - oi.quantity
+             SET i.quantity_available = IF(i.quantity_available >= oi.quantity,
+                                           i.quantity_available - oi.quantity, 0),
+                 i.quantity_reserved  = IF(i.quantity_reserved  >= oi.quantity,
+                                           i.quantity_reserved  - oi.quantity, 0)
              WHERE oi.order_id = ?`,
             [order.id]
         );
@@ -369,6 +414,65 @@ router.post('/:id/confirm-delivery', requireAuth, async (req, res) => {
     }
 });
 
+// ----------------------------------------------------------------
+// POST /orders/:id/cancel — buyer cancels their own unpaid order
+// Releases reserved inventory back to the pool.
+// Only allowed while status is pending_shipping_quote or pending_payment.
+// ----------------------------------------------------------------
+router.post('/:id/cancel', requireAuth, async (req, res) => {
+    const conn = await pool.getConnection();
+    try {
+        const [orderRows] = await conn.query(
+            `SELECT id, status FROM orders
+             WHERE id = ? AND buyer_user_id = ? LIMIT 1`,
+            [req.params.id, req.user.id]
+        );
+        if (orderRows.length === 0) {
+            return res.status(404).json({ error: 'Order not found' });
+        }
+        const order = orderRows[0];
+        if (!['pending_shipping_quote', 'pending_payment'].includes(order.status)) {
+            return res.status(400).json({
+                error: `Order is ${order.status}, cannot be cancelled`
+            });
+        }
+
+        await conn.beginTransaction();
+
+        // Release reserved stock
+        await conn.query(
+            `UPDATE inventory i
+             JOIN order_items oi ON oi.product_id = i.product_id
+             SET i.quantity_reserved = GREATEST(i.quantity_reserved - oi.quantity, 0)
+             WHERE oi.order_id = ?`,
+            [order.id]
+        );
+
+        // Mark pending payment as failed
+        await conn.query(
+            `UPDATE payments
+             SET status = 'failed', failure_reason = 'Order cancelled by buyer'
+             WHERE order_id = ? AND status = 'pending'`,
+            [order.id]
+        );
+
+        // Mark order cancelled
+        await conn.query(
+            `UPDATE orders SET status = 'cancelled' WHERE id = ?`,
+            [order.id]
+        );
+
+        await conn.commit();
+        res.json({ message: 'Order cancelled' });
+    } catch (err) {
+        await conn.rollback();
+        console.error('Cancel order error:', err);
+        res.status(500).json({ error: 'Failed to cancel order' });
+    } finally {
+        conn.release();
+    }
+});
+
 // ================================================================
 // VENDOR ROUTES
 // ================================================================
@@ -381,20 +485,75 @@ router.get('/vendor/mine', requireAuth, async (req, res) => {
         const [orders] = await pool.query(
             `SELECT
                 o.id, o.order_number, o.status, o.currency_code,
-                o.subtotal, o.grand_total, o.placed_at, o.delivered_at,
+                o.subtotal, o.shipping_total, o.grand_total,
+                o.placed_at, o.delivered_at,
                 u.full_name AS buyer_name,
+                a.city      AS buyer_city,
+                a.county    AS buyer_county,
+                a.line1     AS buyer_address_line,
                 (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id) AS item_count,
                 (SELECT status FROM payments p WHERE p.order_id = o.id LIMIT 1) AS payment_status
              FROM orders o
              JOIN users u ON u.id = o.buyer_user_id
+             LEFT JOIN addresses a ON a.id = o.shipping_address_id
              WHERE o.vendor_id = ?
              ORDER BY o.placed_at DESC`,
             [vendor.id]
         );
-        res.json({ count: orders.length, orders });
+        res.json({
+            count: orders.length,
+            orders,
+            vendor_default_shipping: vendor.default_shipping_usd
+        });
     } catch (err) {
         console.error('Vendor orders error:', err);
         res.status(500).json({ error: 'Failed to list vendor orders' });
+    }
+});
+
+// ----------------------------------------------------------------
+// POST /orders/vendor/:id/set-shipping — vendor sets the fee
+// Body: { shipping_fee: number }
+// Moves order from 'pending_shipping_quote' to 'pending_payment'
+// ----------------------------------------------------------------
+router.post('/vendor/:id/set-shipping', requireAuth, async (req, res) => {
+    try {
+        const vendor = await getVendorForUser(req.user.id);
+        if (!vendor) return res.status(403).json({ error: 'You are not a vendor' });
+
+        const fee = Number(req.body?.shipping_fee);
+        if (isNaN(fee) || fee < 0) {
+            return res.status(400).json({ error: 'shipping_fee must be a number >= 0' });
+        }
+
+        const [rows] = await pool.query(
+            `SELECT id, status FROM orders
+             WHERE id = ? AND vendor_id = ? LIMIT 1`,
+            [req.params.id, vendor.id]
+        );
+        if (rows.length === 0) return res.status(404).json({ error: 'Order not found' });
+
+        const order = rows[0];
+        if (order.status !== 'pending_shipping_quote') {
+            return res.status(400).json({
+                error: `Order is ${order.status}, cannot set shipping`
+            });
+        }
+
+        await pool.query(
+            `UPDATE orders
+             SET shipping_total = ?, status = 'pending_payment'
+             WHERE id = ?`,
+            [fee.toFixed(2), order.id]
+        );
+
+        res.json({
+            message: `Shipping fee set to $${fee.toFixed(2)}. Buyer can now pay.`,
+            shipping_fee: fee.toFixed(2)
+        });
+    } catch (err) {
+        console.error('Set shipping fee error:', err);
+        res.status(500).json({ error: 'Failed to set shipping fee' });
     }
 });
 

@@ -1,26 +1,8 @@
-# Dependencies
-node_modules/
-
-# Environment secrets
+﻿node_modules/
+.next/
 .env
 .env.local
-.env.*.local
-
-# Logs
+.env.production
 *.log
-npm-debug.log*
-
-# Build output
-dist/
-build/
-.next/
-
-# OS files
 .DS_Store
-Thumbs.db
-
-# VS Code
-.vscode/
-
-# Uploads (local)
-uploads/
+backend/uploads/

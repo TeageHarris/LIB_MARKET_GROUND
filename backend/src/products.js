@@ -73,7 +73,7 @@ router.post('/', requireAuth, requireApprovedVendor, async (req, res) => {
     try {
         const vendorId = req.vendor.id;
         const {
-            title, description, base_price, category_id, brand,
+            title, description, base_price, shipping_fee_usd, category_id, brand,
             condition_type, weight_grams, length_cm, width_cm, height_cm,
             is_handmade, is_digital, currency_code, initial_stock
         } = req.body;
@@ -86,6 +86,16 @@ router.post('/', requireAuth, requireApprovedVendor, async (req, res) => {
             return res.status(400).json({ error: 'base_price must be a valid positive number' });
         }
 
+        // Optional per-product shipping fee override
+        let shippingFee = 0;
+        if (shipping_fee_usd !== undefined && shipping_fee_usd !== null && shipping_fee_usd !== '') {
+            const fee = Number(shipping_fee_usd);
+            if (isNaN(fee) || fee < 0) {
+                return res.status(400).json({ error: 'shipping_fee_usd must be >= 0' });
+            }
+            shippingFee = fee;
+        }
+
         const slug = await uniqueProductSlug(slugify(title));
 
         await conn.beginTransaction();
@@ -93,16 +103,17 @@ router.post('/', requireAuth, requireApprovedVendor, async (req, res) => {
         const [result] = await conn.query(
             `INSERT INTO products (
                 vendor_id, category_id, title, slug, description, brand,
-                condition_type, status, base_price, currency_code,
+                condition_type, status, base_price, shipping_fee_usd, currency_code,
                 weight_grams, length_cm, width_cm, height_cm,
                 is_handmade, is_digital, origin_country
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, 'LR')`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'LR')`,
             [
                 vendorId,
                 category_id || null,
                 title, slug, description || null, brand || null,
                 condition_type || 'new',
                 price,
+                shippingFee,
                 currency_code || 'USD',
                 weight_grams || null,
                 length_cm || null, width_cm || null, height_cm || null,
@@ -155,7 +166,7 @@ router.patch('/:id', requireAuth, requireApprovedVendor, async (req, res) => {
         }
 
         const allowed = [
-            'title', 'description', 'base_price', 'category_id', 'brand',
+            'title', 'description', 'base_price', 'shipping_fee_usd', 'category_id', 'brand',
             'condition_type', 'status', 'weight_grams',
             'length_cm', 'width_cm', 'height_cm',
             'is_handmade', 'is_digital', 'currency_code'
@@ -243,7 +254,6 @@ router.post('/:id/images', requireAuth, requireApprovedVendor, async (req, res) 
 
         await conn.beginTransaction();
 
-        // If this image is primary, unset any existing primary
         if (is_primary) {
             await conn.query(
                 'UPDATE product_images SET is_primary = 0 WHERE product_id = ?',
@@ -269,6 +279,51 @@ router.post('/:id/images', requireAuth, requireApprovedVendor, async (req, res) 
         res.status(500).json({ error: 'Failed to add image' });
     } finally {
         conn.release();
+    }
+});
+
+// ----------------------------------------------------------------
+// DELETE /products/:id/images/:imageId — remove an image
+// ----------------------------------------------------------------
+router.delete('/:id/images/:imageId', requireAuth, requireApprovedVendor, async (req, res) => {
+    try {
+        const { id: productId, imageId } = req.params;
+
+        const [rows] = await pool.query(
+            'SELECT id FROM products WHERE id = ? AND vendor_id = ? LIMIT 1',
+            [productId, req.vendor.id]
+        );
+        if (rows.length === 0) {
+            return res.status(404).json({ error: 'Product not found or not yours' });
+        }
+
+        const [imgRows] = await pool.query(
+            'SELECT id, is_primary FROM product_images WHERE id = ? AND product_id = ? LIMIT 1',
+            [imageId, productId]
+        );
+        if (imgRows.length === 0) {
+            return res.status(404).json({ error: 'Image not found' });
+        }
+
+        await pool.query('DELETE FROM product_images WHERE id = ?', [imageId]);
+
+        if (imgRows[0].is_primary) {
+            const [remaining] = await pool.query(
+                'SELECT id FROM product_images WHERE product_id = ? ORDER BY sort_order ASC LIMIT 1',
+                [productId]
+            );
+            if (remaining.length > 0) {
+                await pool.query(
+                    'UPDATE product_images SET is_primary = 1 WHERE id = ?',
+                    [remaining[0].id]
+                );
+            }
+        }
+
+        res.json({ message: 'Image removed' });
+    } catch (err) {
+        console.error('Delete image error:', err);
+        res.status(500).json({ error: 'Failed to remove image' });
     }
 });
 
