@@ -5,4 +5,3 @@
 .env.production
 *.log
 .DS_Store
-backend/uploads/
