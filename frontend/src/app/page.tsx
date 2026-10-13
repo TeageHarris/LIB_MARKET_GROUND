@@ -22,7 +22,6 @@ type ProductsResponse = {
   products: Product[];
 };
 
-// Build the full URL for an image (handles both local /uploads and external URLs)
 function imageUrl(path: string | null): string | null {
   if (!path) return null;
   if (path.startsWith('http://') || path.startsWith('https://')) return path;
@@ -53,9 +52,6 @@ export default async function Home() {
         {error && (
           <div className="bg-red-50 border border-red-200 text-red-700 p-4 rounded-lg mb-6">
             <strong>Could not load products.</strong> {error}
-            <p className="text-xs mt-2 text-red-600">
-              Make sure the backend is running at http://localhost:3000
-            </p>
           </div>
         )}
 

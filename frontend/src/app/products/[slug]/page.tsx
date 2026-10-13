@@ -96,7 +96,7 @@ export default async function ProductPage({
         <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-10">
           {/* Left: image + thumbnails */}
           <div>
-            <div className="aspect-square bg-linear-to-br from-emerald-100 to-emerald-200 rounded-2xl flex items-center justify-center overflow-hidden">
+            <div className="aspect-square bg-gradient-to-br from-emerald-100 to-emerald-200 rounded-2xl flex items-center justify-center overflow-hidden">
               {mainImageUrl ? (
                 /* eslint-disable-next-line @next/next/no-img-element */
                 <img

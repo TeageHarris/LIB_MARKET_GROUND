@@ -40,6 +40,11 @@ export function getUser(): AuthUser | null {
   }
 }
 
+export function setUser(user: AuthUser) {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem(USER_KEY, JSON.stringify(user));
+}
+
 export function isLoggedIn(): boolean {
   return !!getToken();
 }

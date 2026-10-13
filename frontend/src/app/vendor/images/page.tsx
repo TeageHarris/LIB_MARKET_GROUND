@@ -4,10 +4,8 @@
 import { useEffect, useState, useCallback, Suspense } from 'react';
 import Link from 'next/link';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { apiGet, apiDelete } from '@/lib/api';
+import { apiGet, apiDelete, API_BASE } from '@/lib/api';
 import { getToken, getUser } from '@/lib/auth';
-
-const API_BASE = 'http://localhost:3000';
 
 type ProductImage = {
   id: number;

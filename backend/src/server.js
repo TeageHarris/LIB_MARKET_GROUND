@@ -3,6 +3,7 @@
 
 require('dotenv').config();
 const path = require('path');
+const fs = require('fs');
 const express = require('express');
 const cors = require('cors');
 const { pool, testConnection } = require('./db');
@@ -15,6 +16,36 @@ const { router: cartRouter }      = require('./cart');
 const { router: addressesRouter } = require('./addresses');
 const { router: ordersRouter }    = require('./orders');
 const { expireStaleOrders }       = require('./expireOrders');
+
+// ----------------------------------------------------------------
+// Startup: ensure uploads folder exists, and seed it from git
+// on first boot if the Railway volume is empty.
+// ----------------------------------------------------------------
+const uploadsDir = path.join(__dirname, '..', 'uploads');
+const seedDir    = path.join(__dirname, '..', 'seed-uploads');
+
+if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+if (fs.existsSync(seedDir)) {
+    const existing = fs.readdirSync(uploadsDir).filter((f) => f !== 'lost+found');
+    if (existing.length === 0) {
+        console.log('[uploads] Volume empty — seeding from seed-uploads/');
+        const seedFiles = fs.readdirSync(seedDir);
+        for (const f of seedFiles) {
+            fs.copyFileSync(
+                path.join(seedDir, f),
+                path.join(uploadsDir, f)
+            );
+        }
+        console.log(`[uploads] Seeded ${seedFiles.length} file(s)`);
+    } else {
+        console.log(`[uploads] Volume has ${existing.length} file(s) — skipping seed`);
+    }
+} else {
+    console.log('[uploads] No seed-uploads/ folder found — skipping seed');
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -34,7 +65,7 @@ app.use((req, res, next) => {
 // ----------------------------------------------------------------
 // Static serving for uploaded images
 // ----------------------------------------------------------------
-app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
+app.use('/uploads', express.static(uploadsDir));
 
 // ----------------------------------------------------------------
 // Health check
