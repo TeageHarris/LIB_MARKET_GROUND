@@ -1,4 +1,3 @@
-
 // src/app/login/page.tsx
 'use client';
 
@@ -24,7 +23,6 @@ function LoginContent() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // Fix the garbled bullet placeholder if user opened in a weird encoding
   useEffect(() => {
     document.title = 'Sign in — LIB_MARKET_GROUND';
   }, []);
@@ -80,6 +78,15 @@ function LoginContent() {
               className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none"
               placeholder="Enter your password"
             />
+          </div>
+
+          <div className="text-right -mt-2">
+            <Link
+              href="/forgot-password"
+              className="text-sm text-emerald-700 font-medium hover:underline"
+            >
+              Forgot password?
+            </Link>
           </div>
 
           {error && (
